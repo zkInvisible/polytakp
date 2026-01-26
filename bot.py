@@ -3,6 +3,7 @@ import json
 import time
 import requests
 import logging
+import html
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -10,7 +11,7 @@ load_dotenv()
 
 # Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_ID = (os.getenv("CHAT_ID") or "").strip()
 POLY_API_KEY = os.getenv("POLY_API_KEY")
 
 # Wallets File
@@ -39,7 +40,14 @@ WALLET_LIST = load_wallets()
 
 # File to store the last processed transaction hash for each wallet
 STATE_FILE = "state.json"
+# File to store the last processed transaction hash for each wallet
+STATE_FILE = "state.json"
 API_BASE_URL = "https://data-api.polymarket.com"
+GAMMA_API_URL = "https://gamma-api.polymarket.com"
+
+# Cache for market names to avoid spamming API
+# Asset ID -> Market Title
+MARKET_CACHE = {}
 
 # Logging Setup
 logging.basicConfig(
@@ -81,6 +89,8 @@ def send_telegram_message(message):
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to send Telegram message: {e}")
+        if e.response is not None:
+             logging.error(f"Telegram Error Details: {e.response.text}")
 
 def get_user_activity(address):
     url = f"{API_BASE_URL}/activity"
@@ -114,6 +124,41 @@ def process_wallet(address, name, last_tx_hash):
     activities = get_user_activity(address)
     if not activities:
         return last_tx_hash
+
+def resolve_market_name(asset_id):
+    """
+    Fetches market title from Polymarket API using Asset ID (Token ID).
+    """
+    if not asset_id or asset_id == "Unknown Asset":
+        return asset_id
+        
+    # Check cache first
+    if asset_id in MARKET_CACHE:
+        return MARKET_CACHE[asset_id]
+        
+    # Try Gamma API (markets logic)
+    # We query /markets?clobTokenIds=... 
+    # Or /events?id=... if we had event ID.
+    # Actually, easiest way for Token ID to Market is usually via Graph or Gamma.
+    # Let's try Gamma /markets endpoint filtering by token_id
+    
+    url = f"{GAMMA_API_URL}/markets"
+    params = {"clobTokenIds": asset_id}
+    
+    try:
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, list) and len(data) > 0:
+                market = data[0]
+                # Combine question + outcome if needed
+                question = market.get("question", "Unknown Market")
+                MARKET_CACHE[asset_id] = question
+                return question
+    except Exception as e:
+        logging.warning(f"Failed to resolve market name for {asset_id}: {e}")
+        
+    return asset_id
 
     # Activities are usually returned newest first.
     # We process them in reverse order (oldest to newest) if we want to catch up, 
@@ -164,7 +209,16 @@ def notify_trade(trade, name, address):
     market_slug = trade.get("marketSlug", "")
     outcome = trade.get("outcome", "")
     
-    market_display = market_slug if market_slug else asset
+    market_slug = trade.get("marketSlug", "")
+    outcome = trade.get("outcome", "")
+    
+    if market_slug:
+        market_display = market_slug
+    elif asset != "Unknown Asset":
+        # Try to resolve valid Asset ID
+        market_display = resolve_market_name(asset)
+    else:
+        market_display = asset
     
     # Determine Action (ALDI/SATTI)
     # logic: if side == "BUY", it's usually ALDI.
@@ -176,10 +230,10 @@ def notify_trade(trade, name, address):
         action = f"{side} ⚪"
 
     message = (
-        f"👤 <b>Cüzdan:</b> {name}\n"
+        f"👤 <b>Cüzdan:</b> {html.escape(str(name))}\n"
         f"📝 <b>Eylem:</b> {action}\n"
-        f"💰 <b>Miktar:</b> {size} @ {price}\n"
-        f"📊 <b>Market:</b> {market_display} ({outcome})\n"
+        f"💰 <b>Miktar:</b> {html.escape(str(size))} @ {html.escape(str(price))}\n"
+        f"📊 <b>Market:</b> {html.escape(str(market_display))} ({html.escape(str(outcome))})\n"
         f"🔗 <a href='https://polymarket.com/profile/{address}'>Profil Linki</a>"
     )
     
