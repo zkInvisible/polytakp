@@ -195,18 +195,18 @@ def notify_trade(trade, name, address):
 
 
     
-# Track active positions per wallet to avoid spamming "Buys"
-# Address -> Set of Asset IDs
-WALLET_POSITIONS = {}
+# Track last action per market to toggle notifications (Buy -> Sell -> Buy)
+# Address -> {Slug: "BUY" or "SELL"}
+WALLET_MARKET_STATE = {}
 
 def process_wallet(address, name, last_tx_hash):
     activities = get_user_activity(address)
     if not activities:
         return last_tx_hash
 
-    # Init position set for wallet if not exists
-    if address not in WALLET_POSITIONS:
-        WALLET_POSITIONS[address] = set()
+    # Init state dict for wallet if not exists
+    if address not in WALLET_MARKET_STATE:
+        WALLET_MARKET_STATE[address] = {}
 
     newest_hash_in_batch = last_tx_hash
     new_trades = []
@@ -223,40 +223,24 @@ def process_wallet(address, name, last_tx_hash):
             break
             
         # STRICT TIMESTAMP CHECK
-        # Ignore anything older than 12 hours (to be safe, user said "years old")
-        # But user also said "guncel zaman" (current time). 
-        # Let's set limit to 1 Hour to ensure we only get FRESH signals.
-        trade_timestamp = activity.get("timestamp")
-        
+        activity_timestamp = activity.get("timestamp")
         is_fresh = False
-        if trade_timestamp:
+        
+        if activity_timestamp:
             try:
-                trade_ts = float(trade_timestamp)
-                if trade_ts > 1000000000000: # ms -> s
-                    trade_ts = trade_ts / 1000
-                
-                # If trade is younger than 1 hour -> Process
-                # If trade is older than 1 hour -> Skip/Ignore
-                if current_time - trade_ts <= 3600:
+                ts = float(activity_timestamp)
+                if ts > 1000000000000: ts = ts / 1000 # ms to s
+                if current_time - ts <= 3600: # 1 Hour Limit
                     is_fresh = True
-                else:
-                     # logging.debug(f"Skipping old trade: {current_time - trade_ts}s old")
-                     pass
-            except ValueError:
+            except:
                 pass
         
-        # If timestamp missing or old, we IGNORE it for notification purposes
-        # BUT we might still update the 'last_tx_hash' to prevent infinite loop?
-        # Actually, if we skip it here, we won't notify. 
-        # But we MUST process it to update 'newest_hash_in_batch' correctly?
-        # No, 'newest_hash_in_batch' comes from the *Activities* loop.
-        # If the top activity is old, we effectively set last_tx_hash to it, preventing re-scan.
-        
+        # If timestamp is missing/broken, we skip strictly to avoid old spam
+        # unless it's genuinely new activity? Safest to rely on timestamp.
         if is_fresh:
             new_trades.append(activity)
             
-    # If first run (last_tx_hash is None), just return the latest hash
-    # We do NOT notify on first run, just sync state.
+    # If first run (last_tx_hash is None), just sync, NO notify.
     if last_tx_hash is None:
         if activities:
              top_activity = activities[0]
@@ -267,32 +251,26 @@ def process_wallet(address, name, last_tx_hash):
     # Process new trades (Oldest to Newest)
     if new_trades:
         for trade in reversed(new_trades):
-            asset = trade.get("asset")
+            # Key for deduplication: Market Slug (Question) preferred
+            slug = trade.get("slug") or trade.get("asset") or "unknown_market"
             side = trade.get("side", "").upper()
             
-            # NOTIFICATION LOGIC
+            # STATE MACHINE NOTIFICATION LOGIC
+            # Only notify if the action (Side) is DIFFERENT from the last known action for this market.
+            # Buy -> Buy (Skip)
+            # Buy -> Sell (Notify) - User exits or trims
+            # Sell -> Sell (Skip) - User trimming more
+            # Sell -> Buy (Notify) - User re-entering
+            # First time (None) -> Buy/Sell (Notify)
+            
+            last_side = WALLET_MARKET_STATE[address].get(slug)
+            
             should_notify = False
-            
-            if side == "BUY":
-                # Only notify if this is a NEW position (not in our session cache)
-                if asset not in WALLET_POSITIONS[address]:
-                    should_notify = True
-                    WALLET_POSITIONS[address].add(asset) # Mark as held
-                else:
-                    logging.info(f"Skipping Duplicate BUY for {name}: {asset} (Already in session)")
-            
-            elif side == "SELL":
-                # Always notify on SELL (User wants to know exits)
-                # We could remove from set, but partial sells exist.
-                # If we remove, a subsequent partial sell isn't a "New Entry", so logic holds.
-                # Just notify.
+            if side != last_side:
                 should_notify = True
-                # Optional: Remove from set? If they sell, maybe they are out?
-                # If we remove, and they Buy back, we get "ALDI" (New Entry). This is good.
-                # If we don't remove, and they Buy back, we get nothing.
-                # User wants "First Buy" signal. So if they exit and re-enter, they probably want a signal.
-                if asset in WALLET_POSITIONS[address]:
-                    WALLET_POSITIONS[address].remove(asset)
+                WALLET_MARKET_STATE[address][slug] = side
+            else:
+                logging.info(f"Suppressing duplicate {side} for {name} on {slug}")
 
             if should_notify:
                 notify_trade(trade, name, address)
