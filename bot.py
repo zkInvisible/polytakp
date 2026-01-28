@@ -266,7 +266,7 @@ def process_wallet(address, name, last_tx_hash):
                 
                 # If same asset AND same side AND sent less than 5 minutes ago
                 if last_asset == current_asset and last_side == current_side:
-                    if time.time() - last_time < 300: # 5 minutes debounce
+                    if time.time() - last_time < 3600: # 60 minutes debounce
                         logging.info(f"Suppressing duplicate notification for {name} ({current_asset})")
                         should_notify = False
             
