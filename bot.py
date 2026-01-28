@@ -40,8 +40,6 @@ WALLET_LIST = load_wallets()
 
 # File to store the last processed transaction hash for each wallet
 STATE_FILE = "state.json"
-# File to store the last processed transaction hash for each wallet
-STATE_FILE = "state.json"
 API_BASE_URL = "https://data-api.polymarket.com"
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
@@ -120,11 +118,6 @@ def get_user_activity(address):
         logging.error(f"Error fetching activity for {address}: {e}")
         return []
 
-def process_wallet(address, name, last_tx_hash):
-    activities = get_user_activity(address)
-    if not activities:
-        return last_tx_hash
-
 def resolve_market_name(asset_id):
     """
     Fetches market title from Polymarket API using Asset ID (Token ID).
@@ -138,9 +131,6 @@ def resolve_market_name(asset_id):
         
     # Try Gamma API (markets logic)
     # We query /markets?clobTokenIds=... 
-    # Or /events?id=... if we had event ID.
-    # Actually, easiest way for Token ID to Market is usually via Graph or Gamma.
-    # Let's try Gamma /markets endpoint filtering by token_id
     
     url = f"{GAMMA_API_URL}/markets"
     params = {"clobTokenIds": asset_id}
@@ -159,6 +149,51 @@ def resolve_market_name(asset_id):
         logging.warning(f"Failed to resolve market name for {asset_id}: {e}")
         
     return asset_id
+
+def notify_trade(trade, name, address):
+    # Parse Trade Details
+    side = trade.get("side", "UNKNOWN") # BUY / SELL
+    size = trade.get("size", "0")
+    price = trade.get("price", "0")
+    asset = trade.get("asset", "Unknown Asset")
+    
+    # Try to find a readable name for the market/asset
+    # The API might return 'marketSlug' or 'outcome'
+    market_slug = trade.get("marketSlug", "")
+    outcome = trade.get("outcome", "")
+    
+    if market_slug:
+        market_display = market_slug
+    elif asset != "Unknown Asset":
+        # Try to resolve valid Asset ID
+        market_display = resolve_market_name(asset)
+    else:
+        market_display = asset
+    
+    # Determine Action (ALDI/SATTI)
+    # logic: if side == "BUY", it's usually ALDI.
+    if side.upper() == "BUY":
+        action = "ALDI 🟢"
+    elif side.upper() == "SELL":
+        action = "SATTI 🔴"
+    else:
+        action = f"{side} ⚪"
+
+    message = (
+        f"👤 <b>Cüzdan:</b> {html.escape(str(name))}\n"
+        f"📝 <b>Eylem:</b> {action}\n"
+        f"💰 <b>Miktar:</b> {html.escape(str(size))} @ {html.escape(str(price))}\n"
+        f"📊 <b>Market:</b> {html.escape(str(market_display))} ({html.escape(str(outcome))})\n"
+        f"🔗 <a href='https://polymarket.com/profile/{address}'>Profil Linki</a>"
+    )
+    
+    send_telegram_message(message)
+    logging.info(f"Notification sent for {name}: {action} {size} @ {price}")
+
+def process_wallet(address, name, last_tx_hash):
+    activities = get_user_activity(address)
+    if not activities:
+        return last_tx_hash
 
     # Activities are usually returned newest first.
     # We process them in reverse order (oldest to newest) if we want to catch up, 
@@ -196,49 +231,6 @@ def resolve_market_name(asset_id):
             newest_hash_in_batch = trade.get("transactionHash") or trade.get("id")
 
     return newest_hash_in_batch
-
-def notify_trade(trade, name, address):
-    # Parse Trade Details
-    side = trade.get("side", "UNKNOWN") # BUY / SELL
-    size = trade.get("size", "0")
-    price = trade.get("price", "0")
-    asset = trade.get("asset", "Unknown Asset")
-    
-    # Try to find a readable name for the market/asset
-    # The API might return 'marketSlug' or 'outcome'
-    market_slug = trade.get("marketSlug", "")
-    outcome = trade.get("outcome", "")
-    
-    market_slug = trade.get("marketSlug", "")
-    outcome = trade.get("outcome", "")
-    
-    if market_slug:
-        market_display = market_slug
-    elif asset != "Unknown Asset":
-        # Try to resolve valid Asset ID
-        market_display = resolve_market_name(asset)
-    else:
-        market_display = asset
-    
-    # Determine Action (ALDI/SATTI)
-    # logic: if side == "BUY", it's usually ALDI.
-    if side.upper() == "BUY":
-        action = "ALDI 🟢"
-    elif side.upper() == "SELL":
-        action = "SATTI 🔴"
-    else:
-        action = f"{side} ⚪"
-
-    message = (
-        f"👤 <b>Cüzdan:</b> {html.escape(str(name))}\n"
-        f"📝 <b>Eylem:</b> {action}\n"
-        f"💰 <b>Miktar:</b> {html.escape(str(size))} @ {html.escape(str(price))}\n"
-        f"📊 <b>Market:</b> {html.escape(str(market_display))} ({html.escape(str(outcome))})\n"
-        f"🔗 <a href='https://polymarket.com/profile/{address}'>Profil Linki</a>"
-    )
-    
-    send_telegram_message(message)
-    logging.info(f"Notification sent for {name}: {action} {size} @ {price}")
 
 def main():
     logging.info("Polymarket Bot Started...")
