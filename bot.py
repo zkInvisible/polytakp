@@ -158,12 +158,15 @@ def notify_trade(trade, name, address):
     asset = trade.get("asset", "Unknown Asset")
     
     # Try to find a readable name for the market/asset
-    # The API might return 'marketSlug' or 'outcome'
-    market_slug = trade.get("marketSlug", "")
+    # The API returns 'title', 'slug', 'outcome'
+    title = trade.get("title")
+    slug = trade.get("slug")
     outcome = trade.get("outcome", "")
     
-    if market_slug:
-        market_display = market_slug
+    if title:
+        market_display = title
+    elif slug:
+        market_display = slug
     elif asset != "Unknown Asset":
         # Try to resolve valid Asset ID
         market_display = resolve_market_name(asset)
