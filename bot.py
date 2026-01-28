@@ -190,20 +190,24 @@ def notify_trade(trade, name, address):
     send_telegram_message(message)
     logging.info(f"Notification sent for {name}: {action} {size} @ {price}")
 
+
+    
+# duplicate suppression cache: address -> {asset_id, side, timestamp}
+LAST_NOTIFICATION_CACHE = {}
+
 def process_wallet(address, name, last_tx_hash):
     activities = get_user_activity(address)
     if not activities:
         return last_tx_hash
 
-    # Activities are usually returned newest first.
-    # We process them in reverse order (oldest to newest) if we want to catch up, 
-    # but for simplicity in a loop, we just check if it's new.
-    
     # Found newest hash in the list
     newest_hash_in_batch = last_tx_hash
     
     # Filter for new trades only
     new_trades = []
+    
+    # Current time for filtering old trades
+    current_time = time.time()
     
     for activity in activities:
         tx_hash = activity.get("transactionHash") or activity.get("id") # Fallback to ID if hash missing
@@ -214,12 +218,33 @@ def process_wallet(address, name, last_tx_hash):
         if tx_hash == last_tx_hash:
             break
             
+        # TIMESTAMP CHECK: Ignore trades older than 30 minutes (1800 seconds)
+        # Polymarket API usually returns timestamp in seconds or milliseconds. 
+        # API documentation says 'timestamp' is unix timestamp (seconds).
+        # Sometimes it might be missing, so we safely get it.
+        trade_timestamp = activity.get("timestamp")
+        
+        if trade_timestamp:
+            try:
+                trade_ts = float(trade_timestamp)
+                # If timestamp is in milliseconds (huge number), convert to seconds
+                if trade_ts > 1000000000000: 
+                    trade_ts = trade_ts / 1000
+                
+                # If trade is older than 30 mins, skip it
+                if current_time - trade_ts > 1800:
+                    logging.info(f"Skipping old trade for {name}: {current_time - trade_ts:.0f}s old.")
+                    continue
+            except ValueError:
+                pass # If parsing fails, proceed safely (or skip? safely proceed to be sure)
+        
         new_trades.append(activity)
     
     # If last_tx_hash was None (first run), we might not want to spam all history.
     if last_tx_hash is None:
         if activities:
-             # First run: Mark the most recent one as seen, don't alert (or alert only latest?)
+             # First run: Mark the most recent one as seen, don't alert
+             # We take the very first item (index 0) which is the newest activity
              logging.info(f"First run for {name}. Setting baseline to latest transaction.")
              return activities[0].get("transactionHash") or activities[0].get("id")
         return None
@@ -227,7 +252,34 @@ def process_wallet(address, name, last_tx_hash):
     # Process new trades (reverse to send notifications in chronological order)
     if new_trades:
         for trade in reversed(new_trades):
-            notify_trade(trade, name, address)
+            # DUPLICATE SUPPRESSION
+            # Check if we just notified about this asset/side for this wallet
+            wallet_last_notif = LAST_NOTIFICATION_CACHE.get(address)
+            current_asset = trade.get("asset")
+            current_side = trade.get("side")
+            
+            should_notify = True
+            if wallet_last_notif:
+                last_asset = wallet_last_notif.get("asset")
+                last_side = wallet_last_notif.get("side")
+                last_time = wallet_last_notif.get("time", 0)
+                
+                # If same asset AND same side AND sent less than 5 minutes ago
+                if last_asset == current_asset and last_side == current_side:
+                    if time.time() - last_time < 300: # 5 minutes debounce
+                        logging.info(f"Suppressing duplicate notification for {name} ({current_asset})")
+                        should_notify = False
+            
+            if should_notify:
+                notify_trade(trade, name, address)
+                # Update cache
+                LAST_NOTIFICATION_CACHE[address] = {
+                    "asset": current_asset, 
+                    "side": current_side,
+                    "time": time.time()
+                }
+
+            # Always update the hash pointer so we don't process it again
             newest_hash_in_batch = trade.get("transactionHash") or trade.get("id")
 
     return newest_hash_in_batch
