@@ -314,16 +314,17 @@ def main():
                 time.sleep(2)
                 
             logging.info("Cycle complete. Waiting 60s...")
-            time.sleep(60)
+            time.sleep(30)
             
         except KeyboardInterrupt:
             logging.info("Bot stopped by user.")
             break
         except Exception as e:
             logging.error(f"Unexpected error in main loop: {e}")
-            time.sleep(60) # Wait before retrying
+            time.sleep(30) # Wait before retrying
 
 if __name__ == "__main__":
     main()
+
 
 
